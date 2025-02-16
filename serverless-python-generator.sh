@@ -51,6 +51,45 @@ validate_project_name() {
     fi
 }
 
+check_and_install_dependencies() {
+    info "🔍 Verificando dependencias del sistema..."
+
+    # Verificar Java
+    if ! command -v java &>/dev/null; then
+        warning "❌ Java no está instalado"
+        info "📦 Instalando OpenJDK..."
+        sudo apt update && sudo apt install -y default-jre || {
+            error "❌ Error instalando Java. Por favor, instálalo manualmente:
+            sudo apt update
+            sudo apt install default-jre"
+        }
+    fi
+
+    # Verificar otras dependencias
+    for dep in python3 pip3 git node npm; do
+        if ! command -v "$dep" &>/dev/null; then
+            error "❌ $dep no está instalado"
+        fi
+    done
+
+    # Verificar versiones mínimas
+    local min_python_version="3.8"
+    local min_node_version="16"
+    
+    local python_version=$(python3 -c 'import sys; print(".".join(map(str, sys.version_info[:2])))')
+    local node_version=$(node -v | cut -d'v' -f2 | cut -d'.' -f1)
+
+    if ! python3 -c "import sys; exit(0 if sys.version_info >= (${min_python_version//./, }) else 1)" &>/dev/null; then
+        error "❌ Se requiere Python >= $min_python_version (actual: $python_version)"
+    fi
+
+    if [[ $node_version -lt $min_node_version ]]; then
+        error "❌ Se requiere Node.js >= $min_node_version (actual: $node_version)"
+    fi
+
+    success "✅ Todas las dependencias están instaladas correctamente"
+}
+
 check_environment() {
     info "🔍 Verificando ambiente de desarrollo..."
     
@@ -331,6 +370,7 @@ provider:
   environment:
     STAGE: \${self:provider.stage}
     REGION: \${self:provider.region}
+    DYNAMODB_TABLE: \${self:service}-\${self:provider.stage}
 
 plugins:
 $(printf "  - %s\n" "${selected_plugins[@]}")
@@ -341,6 +381,23 @@ custom:
     layer:
       name: python-deps
 
+  dynamodb:
+    stages:
+      - dev
+      - local
+    start:
+      port: 8000
+      inMemory: true
+      migrate: true
+      seed: true
+
+  tableName: \${self:provider.environment.DYNAMODB_TABLE}
+
+  serverless-offline:
+    httpPort: 3000
+    lambdaPort: 3002
+    noPrependStageInUrl: true
+
 functions:
   hello:
     handler: src/functions/hello.handler
@@ -348,6 +405,50 @@ functions:
       - http:
           path: /
           method: get
+    environment:
+      DYNAMODB_TABLE: \${self:custom.tableName}
+
+resources:
+  Resources:
+    OrdersTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: \${self:custom.tableName}
+        AttributeDefinitions:
+          - AttributeName: id
+            AttributeType: S
+          - AttributeName: status
+            AttributeType: S
+        KeySchema:
+          - AttributeName: id
+            KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: StatusIndex
+            KeySchema:
+              - AttributeName: status
+                KeyType: HASH
+            Projection:
+              ProjectionType: ALL
+        BillingMode: PAY_PER_REQUEST
+EOF
+
+    # Crear archivo de seed para DynamoDB Local
+    mkdir -p "$name/config/dynamodb"
+    cat > "$name/config/dynamodb/orders.json" <<EOF
+{
+  "OrdersTable": [
+    {
+      "PutRequest": {
+        "Item": {
+          "id": { "S": "WO-001" },
+          "status": { "S": "received" },
+          "description": { "S": "Sample order 1" },
+          "createdAt": { "S": "2024-02-16T12:00:00Z" }
+        }
+      }
+    }
+  ]
+}
 EOF
 }
 
@@ -425,6 +526,7 @@ pynamodb>=5.0.0
 python-dotenv>=1.0.0
 requests>=2.28.0
 mypy>=1.0.0
+aws-lambda-powertools>=2.0.0
 EOF
 }
 
@@ -485,10 +587,52 @@ EOF
     git commit -m "🚀 Commit inicial"
 }
 
+create_start_script() {
+    local name="$1"
+    cat > "$name/scripts/start-local.sh" <<'EOF'
+#!/bin/bash
+
+# Verificar si Java está instalado
+if ! command -v java &>/dev/null; then
+    echo "❌ Error: Java no está instalado"
+    echo "📦 Instala Java con:"
+    echo "sudo apt update && sudo apt install -y default-jre"
+    exit 1
+fi
+
+# Iniciar DynamoDB Local
+echo "🔄 Iniciando DynamoDB Local..."
+serverless dynamodb start &
+DYNAMO_PID=$!
+
+# Esperar a que DynamoDB esté listo
+sleep 5
+
+# Iniciar Serverless Offline
+echo "🚀 Iniciando Serverless Offline..."
+serverless offline
+
+# Manejar cierre limpio
+trap 'kill $DYNAMO_PID' EXIT
+EOF
+
+    chmod +x "$name/scripts/start-local.sh"
+}
+
+install_dynamodb_local_from_url () {
+    local name="$1"
+    echo "📦 Instalando dynamodb-local:"
+    wget -P "$name/.dynamodb" https://s3.us-west-2.amazonaws.com/dynamodb-local/dynamodb_local_latest.zip
+    unzip "$name/.dynamodb/dynamodb_local_latest.zip" -d "$name/.dynamodb"
+    rm "$name/.dynamodb/dynamodb_local_latest.zip"
+}
+
 # ==========================================
 # Función Principal
 # ==========================================
 main() {
+    print_step "0" "Verificando dependencias"
+    check_and_install_dependencies
     check_environment
 
     print_step "1" "Configuración del proyecto"
@@ -514,6 +658,7 @@ main() {
     [[ $USE_DOCKER == "y" ]] && create_docker_config "."
     create_sample_lambda "."
     create_requirements "."
+    create_start_script "."
 
     # Agregar aquí la creación del archivo .flake8
     cat > .flake8 <<'EOF'
@@ -528,6 +673,8 @@ EOF
     [[ $INIT_GIT == "y" ]] && initialize_git
 
     [[ ${#selected_plugins[@]} -gt 0 ]] && install_serverless_plugins
+
+    install_dynamodb_local_from_url "."
 
     success "🎉 Proyecto '$PROJECT_NAME' creado exitosamente!"
     
