@@ -371,6 +371,7 @@ provider:
     STAGE: \${self:provider.stage}
     REGION: \${self:provider.region}
     DYNAMODB_TABLE: \${self:service}-\${self:provider.stage}
+    DYNAMODB_ENDPOINT: \${env:DYNAMODB_ENDPOINT, 'http://localhost:8000'}
 
 plugins:
 $(printf "  - %s\n" "${selected_plugins[@]}")
@@ -390,6 +391,11 @@ custom:
       inMemory: true
       migrate: true
       seed: true
+    seed:
+      test:
+        sources:
+          - table: \${self:provider.environment.DYNAMODB_TABLE}
+            sources: [./config/dynamodb/seeds.json]
 
   tableName: \${self:provider.environment.DYNAMODB_TABLE}
 
@@ -397,6 +403,8 @@ custom:
     httpPort: 3000
     lambdaPort: 3002
     noPrependStageInUrl: true
+    useChildProcesses: true
+    ignoreJWTSignature: true
 
 functions:
   hello:
@@ -407,6 +415,7 @@ functions:
           method: get
     environment:
       DYNAMODB_TABLE: \${self:custom.tableName}
+      DYNAMODB_ENDPOINT: \${self:provider.environment.DYNAMODB_ENDPOINT}
 
 resources:
   Resources:
@@ -591,29 +600,59 @@ create_start_script() {
     local name="$1"
     cat > "$name/scripts/start-local.sh" <<'EOF'
 #!/bin/bash
+set -e
 
-# Verificar si Java está instalado
+# Colores
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+RED='\033[0;31m'
+NC='\033[0m'
+
+# Verificar Java
 if ! command -v java &>/dev/null; then
-    echo "❌ Error: Java no está instalado"
-    echo "📦 Instala Java con:"
-    echo "sudo apt update && sudo apt install -y default-jre"
+    echo -e "${RED}❌ Error: Java no está instalado"
+    echo -e "📦 Instala Java con:"
+    echo -e "sudo apt update && sudo apt install -y default-jre${NC}"
     exit 1
 fi
 
+# Configurar credenciales falsas para desarrollo local
+export AWS_ACCESS_KEY_ID=LOCAL
+export AWS_SECRET_ACCESS_KEY=LOCAL
+export AWS_DEFAULT_REGION=us-east-1
+
+# Crear archivo .env si no existe
+if [ ! -f .env ]; then
+    echo -e "${BLUE}📝 Creando archivo .env...${NC}"
+    cat > .env <<ENVEOF
+AWS_ACCESS_KEY_ID=LOCAL
+AWS_SECRET_ACCESS_KEY=LOCAL
+AWS_DEFAULT_REGION=us-east-1
+DYNAMODB_ENDPOINT=http://localhost:8000
+STAGE=dev
+ENVEOF
+fi
+
 # Iniciar DynamoDB Local
-echo "🔄 Iniciando DynamoDB Local..."
+echo -e "${BLUE}🔄 Iniciando DynamoDB Local...${NC}"
 serverless dynamodb start &
 DYNAMO_PID=$!
 
 # Esperar a que DynamoDB esté listo
+echo -e "${BLUE}⏳ Esperando a que DynamoDB esté listo...${NC}"
 sleep 5
 
 # Iniciar Serverless Offline
-echo "🚀 Iniciando Serverless Offline..."
-serverless offline
+echo -e "${GREEN}🚀 Iniciando Serverless Offline...${NC}"
+DYNAMODB_ENDPOINT=http://localhost:8000 serverless offline
 
 # Manejar cierre limpio
-trap 'kill $DYNAMO_PID' EXIT
+cleanup() {
+    echo -e "${BLUE}🛑 Deteniendo servicios...${NC}"
+    kill $DYNAMO_PID 2>/dev/null || true
+}
+
+trap cleanup EXIT INT TERM
 EOF
 
     chmod +x "$name/scripts/start-local.sh"
