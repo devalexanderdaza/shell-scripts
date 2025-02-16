@@ -267,7 +267,7 @@ create_env_example() {
 # Variables de entorno de ejemplo
 AWS_ACCESS_KEY_ID=your_access_key
 AWS_SECRET_ACCESS_KEY=your_secret_key
-AWS_DEFAULT_REGION=us-east-1
+AWS_DEFAULT_REGION=
 DATABASE_URL=your_database_url
 EOF
 }
@@ -365,13 +365,26 @@ service: api
 provider:
   name: aws
   runtime: python3.9
-  region: \${opt:region, 'us-east-1'}
+  region: \${opt:region, ''}
   stage: \${opt:stage, 'dev'}
   environment:
     STAGE: \${self:provider.stage}
     REGION: \${self:provider.region}
     DYNAMODB_TABLE: \${self:service}-\${self:provider.stage}
-    DYNAMODB_ENDPOINT: \${env:DYNAMODB_ENDPOINT, 'http://localhost:8000'}
+    DYNAMODB_ENDPOINT: http://localhost:8000
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - dynamodb:Query
+            - dynamodb:Scan
+            - dynamodb:GetItem
+            - dynamodb:PutItem
+            - dynamodb:UpdateItem
+            - dynamodb:DeleteItem
+            - dynamodb:ListTables
+          Resource: "*"
 
 plugins:
 $(printf "  - %s\n" "${selected_plugins[@]}")
@@ -383,28 +396,23 @@ custom:
       name: python-deps
 
   dynamodb:
-    stages:
-      - dev
-      - local
     start:
       port: 8000
       inMemory: true
       migrate: true
       seed: true
+    stages:
+      - dev
     seed:
-      test:
+      domain:
         sources:
           - table: \${self:provider.environment.DYNAMODB_TABLE}
-            sources: [./config/dynamodb/seeds.json]
-
-  tableName: \${self:provider.environment.DYNAMODB_TABLE}
+            sources: [./config/dynamodb/orders.json]
 
   serverless-offline:
     httpPort: 3000
     lambdaPort: 3002
     noPrependStageInUrl: true
-    useChildProcesses: true
-    ignoreJWTSignature: true
 
 functions:
   hello:
@@ -414,15 +422,15 @@ functions:
           path: /
           method: get
     environment:
-      DYNAMODB_TABLE: \${self:custom.tableName}
-      DYNAMODB_ENDPOINT: \${self:provider.environment.DYNAMODB_ENDPOINT}
+      DYNAMODB_TABLE: \${self:provider.environment.DYNAMODB_TABLE}
+      DYNAMODB_ENDPOINT: http://localhost:8000
 
 resources:
   Resources:
     OrdersTable:
       Type: AWS::DynamoDB::Table
       Properties:
-        TableName: \${self:custom.tableName}
+        TableName: \${self:provider.environment.DYNAMODB_TABLE}
         AttributeDefinitions:
           - AttributeName: id
             AttributeType: S
@@ -485,7 +493,7 @@ services:
     environment:
       - AWS_ACCESS_KEY_ID=dummy
       - AWS_SECRET_ACCESS_KEY=dummy
-      - AWS_DEFAULT_REGION=us-east-1
+      - AWS_DEFAULT_REGION=
 EOF
 }
 
@@ -496,12 +504,26 @@ create_sample_lambda() {
 
 import json
 import logging
+import os
+import boto3
 from typing import Dict, Any
 
 # Configurar logger
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
+def get_dynamodb_client():
+    """Instancia de dynamo."""
+    endpoint_url = os.environ.get("DYNAMODB_ENDPOINT")
+    if endpoint_url:
+        return boto3.client(
+            "dynamodb",
+            endpoint_url=endpoint_url,
+            region_name="",
+            aws_access_key_id="DUMMYIDEXAMPLE",
+            aws_secret_access_key="DUMMYEXAMPLEKEY",
+        )
+    return boto3.client("dynamodb")
 
 def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """Manejador de Lambda para el endpoint hello.
@@ -515,11 +537,27 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """
     logger.info("Event received: %s", event)
 
-    return {
-        "statusCode": 200,
-        "headers": {"Content-Type": "application/json"},
-        "body": json.dumps({"message": "Hello from Lambda!", "event": event}),
-    }
+    try:
+        # Probar conexión a DynamoDB
+        dynamodb = get_dynamodb_client()
+        table_name = os.environ.get("DYNAMODB_TABLE", "")
+        tables = dynamodb.list_tables()
+
+        return {
+            "statusCode": 200,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps(
+                {
+                    "message": "Hello from Lambda!",
+                    "dynamodb_tables": tables.get("TableNames", []),
+                    "table_name": table_name,
+                    "endpoint": os.environ.get("DYNAMODB_ENDPOINT", "AWS"),
+                }
+            ),
+        }
+    except Exception as e:
+        logger.error("Error: %s", str(e))
+        return {"statusCode": 500, "body": json.dumps({"error": str(e)})}
 EOF
 }
 
@@ -556,13 +594,13 @@ repos:
     hooks:
       - id: black
         language_version: python3
-        args: [--line-length=88]
+        args: [--line-length=80]
 
   - repo: https://github.com/pycqa/flake8
     rev: 7.0.0
     hooks:
       - id: flake8
-        args: [--max-line-length=88]
+        args: [--max-line-length=80]
         additional_dependencies: [flake8-docstrings]
 
   - repo: https://github.com/pre-commit/mirrors-mypy
@@ -608,6 +646,11 @@ BLUE='\033[0;34m'
 RED='\033[0;31m'
 NC='\033[0m'
 
+# Configurar credenciales falsas para desarrollo local
+export AWS_ACCESS_KEY_ID='DUMMYIDEXAMPLE'
+export AWS_SECRET_ACCESS_KEY='DUMMYEXAMPLEKEY'
+export AWS_DEFAULT_REGION=
+
 # Verificar Java
 if ! command -v java &>/dev/null; then
     echo -e "${RED}❌ Error: Java no está instalado"
@@ -616,35 +659,58 @@ if ! command -v java &>/dev/null; then
     exit 1
 fi
 
-# Configurar credenciales falsas para desarrollo local
-export AWS_ACCESS_KEY_ID=LOCAL
-export AWS_SECRET_ACCESS_KEY=LOCAL
-export AWS_DEFAULT_REGION=us-east-1
-
 # Crear archivo .env si no existe
 if [ ! -f .env ]; then
     echo -e "${BLUE}📝 Creando archivo .env...${NC}"
     cat > .env <<ENVEOF
-AWS_ACCESS_KEY_ID=LOCAL
-AWS_SECRET_ACCESS_KEY=LOCAL
-AWS_DEFAULT_REGION=us-east-1
+AWS_ACCESS_KEY_ID=DUMMYIDEXAMPLE
+AWS_SECRET_ACCESS_KEY=DUMMYEXAMPLEKEY
+AWS_DEFAULT_REGION=
 DYNAMODB_ENDPOINT=http://localhost:8000
 STAGE=dev
 ENVEOF
 fi
 
-# Iniciar DynamoDB Local
+# Matar cualquier proceso en el puerto 8000
+lsof -ti:8000 | xargs -r kill -9
+
+# Iniciar DynamoDB en modo separado
 echo -e "${BLUE}🔄 Iniciando DynamoDB Local...${NC}"
-serverless dynamodb start &
+JAVA_OPTS="-Xms512m -Xmx512m" serverless dynamodb start &
 DYNAMO_PID=$!
 
 # Esperar a que DynamoDB esté listo
-echo -e "${BLUE}⏳ Esperando a que DynamoDB esté listo...${NC}"
-sleep 5
+echo -e "${BLUE}⏳ Esperando a que DynamoDB inicie...${NC}"
+max_attempts=30
+attempt=0
+while ! curl -s http://localhost:8000 >/dev/null; do
+    attempt=$((attempt+1))
+    if [ $attempt -eq $max_attempts ]; then
+        echo -e "${RED}❌ Error: DynamoDB no pudo iniciar después de $max_attempts intentos${NC}"
+        kill $DYNAMO_PID
+        exit 1
+    fi
+    sleep 1
+    echo -n "."
+done
+echo -e "\n${GREEN}✅ DynamoDB está listo${NC}"
+
+# Crear tablas
+echo -e "${BLUE}📦 Creando tablas...${NC}"
+aws dynamodb create-table \
+    --table-name api-dev \
+    --attribute-definitions \
+        AttributeName=id,AttributeType=S \
+        AttributeName=status,AttributeType=S \
+    --key-schema AttributeName=id,KeyType=HASH \
+    --global-secondary-indexes \
+        IndexName=StatusIndex,KeySchema=["{AttributeName=status,KeyType=HASH}"],Projection="{ProjectionType=ALL}" \
+    --billing-mode PAY_PER_REQUEST \
+    --endpoint-url http://localhost:8000 2>/dev/null || true
 
 # Iniciar Serverless Offline
 echo -e "${GREEN}🚀 Iniciando Serverless Offline...${NC}"
-DYNAMODB_ENDPOINT=http://localhost:8000 serverless offline
+serverless offline
 
 # Manejar cierre limpio
 cleanup() {
@@ -652,7 +718,8 @@ cleanup() {
     kill $DYNAMO_PID 2>/dev/null || true
 }
 
-trap cleanup EXIT INT TERM
+# Limpiar al salir
+trap 'jobs -p | xargs -r kill' EXIT
 EOF
 
     chmod +x "$name/scripts/start-local.sh"
@@ -702,7 +769,7 @@ main() {
     # Agregar aquí la creación del archivo .flake8
     cat > .flake8 <<'EOF'
 [flake8]
-max-line-length = 88
+max-line-length = 80
 extend-ignore = E203
 exclude = .git,__pycache__,build,dist
 docstring-convention = google
