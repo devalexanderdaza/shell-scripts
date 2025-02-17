@@ -1,0 +1,9 @@
+# Configuración generada el lun 17 feb 2025 07:42:53 -05
+CONFIG[use_terraform]='n'
+CONFIG[init_git]='y'
+CONFIG[use_virtualenv]='y'
+CONFIG[use_docker]='y'
+CONFIG[use_cicd]='y'
+CONFIG[use_precommit]='n'
+CONFIG[project_name]='api'
+CONFIG[use_typescript]='n'

@@ -27,7 +27,6 @@ declare -ra AVAILABLE_PLUGINS=(
     "serverless-offline"
     "serverless-dynamodb-local"
     "serverless-localstack"
-    "serverless-plugin-aws-alerts"
     "serverless-plugin-warmup"
     "serverless-prune-plugin"
 )
@@ -56,7 +55,7 @@ declare -r SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || {
 # Variables globales (usar readonly para arrays)
 declare -A CONFIG
 declare -a SELECTED_PLUGINS=()
-readonly REQUIRED_CMDS=(python3 pip3 git node npm java aws)
+readonly REQUIRED_CMDS=(python3 pip3 git node npm serverless java aws)
 
 # ==========================================
 # Funciones de Utilidad
@@ -2068,14 +2067,6 @@ repos:
       - id: hadolint
         args: ["--ignore", "DL3013", "--ignore", "DL3018"]
 
-  # Validación de archivos serverless
-  - repo: https://github.com/keithrozario/serverless-pre-commit
-    rev: v1.3.0
-    hooks:
-      - id: serverless-config
-      - id: serverless-policy
-        args: ["--strict"]
-
   # Verificar secretos
   - repo: https://github.com/Yelp/detect-secrets
     rev: v1.4.0
@@ -2283,6 +2274,8 @@ EOF
 # ==========================================
 initialize_git() {
     local project_dir="$1"
+    local project_name="$2"
+    local use_precommit="$3"
     
     # Verificar si git ya está inicializado
     if [[ -d "${project_dir}/.git" ]]; then
@@ -2540,7 +2533,9 @@ if ! [[ "$commit_msg" =~ $conventional_pattern ]]; then
     exit 1
 fi
 EOF
-    chmod +x "${project_dir}/.githooks/commit-msg"
+    if [ "$use_precommit" = "y" ]; then
+        chmod +x "${project_dir}/.githooks/commit-msg"
+    fi
 
     # Configurar git
     info "⚙️  Configurando Git..."
@@ -2554,9 +2549,9 @@ EOF
     git config --local init.defaultBranch main
 
     # Configurar pre-commit si está habilitado
-    if [[ $USE_PRECOMMIT == "y" ]]; then
+    if [ "$use_precommit" = "y" ]; then
         info "🔧 Configurando pre-commit..."
-        setup_precommit || warning "⚠️  Error configurando pre-commit"
+        pre-commit install
     fi
 
     # Crear rama principal y hacer commit inicial
@@ -2575,7 +2570,7 @@ Co-authored-by: $USER <${USER}@$(hostname)>"
 
     success "✅ Repositorio Git inicializado exitosamente"
     info "ℹ️  Rama principal: main"
-    info "ℹ️  Pre-commit: ${USE_PRECOMMIT}"
+    info "ℹ️  Pre-commit: ${use_precommit}"
 }
 
 create_start_script() {
@@ -3110,34 +3105,78 @@ configure_options() {
     
     # Función para preguntar sí/no
     ask_yes_no() {
-        local prompt=$1 # Pregunta a mostrar al usuario
-        local default=${2:-"y"} # Valor por defecto si no hay respuesta o es inválida (y/n)
-        local response # Respuesta del usuario (y/n)
-        
-        while true; do
-            read -r -p "$prompt ($default): " response
-            response=${response,,} # Convertir a minúsculas
+        local prompt="$1"
+        local default="${2:-y}"
+        local response=""
 
-            case $response in
-                [yY] | [yY][eE][sS]) echo "y"; return 0 ;; # Sí o Yes (mayúsculas o minúsculas) -> y
-                [nN] | [nN][oO]) echo "n"; return 1 ;; # No o No (mayúsculas o minúsculas) -> n
-                "") echo "$default"; return 0 ;; # Respuesta vacía -> valor por defecto
-                (*) echo "Por favor responde 'y' o 'n'" >&2 ;; # Otra respuesta -> mensaje de error y repetir
+        # Validar el valor por defecto
+        if [[ ! $default =~ ^[yn]$ ]]; then
+            error "❌ Valor por defecto inválido: $default. Debe ser 'y' o 'n'"
+            return 1
+        fi
+
+        # Preparar el texto del prompt según el valor por defecto
+        local prompt_text
+        if [[ $default == "y" ]]; then
+            prompt_text="$prompt [Y/n]"
+        else
+            prompt_text="$prompt [y/N]"
+        fi
+
+        while true; do
+            # Mostrar el prompt y leer la respuesta
+            read -r -p "$prompt_text: " response
+
+            # Si la respuesta está vacía, usar el valor por defecto
+            if [[ -z $response ]]; then
+                # echo "$default"
+                return $([ "$default" = "y" ] && echo 0 || echo 1)
+            fi
+
+            # Convertir la respuesta a minúsculas
+            response=$(echo "$response" | tr '[:upper:]' '[:lower:]')
+
+            # Validar y procesar la respuesta
+            case "$response" in
+                y|yes)
+                    # echo "y"
+                    return 0
+                    ;;
+                n|no)
+                    # echo "n"
+                    return 1
+                    ;;
+                *)
+                    echo "Por favor responde 'y' (yes) o 'n' (no)" >&2
+                    ;;
             esac
         done
     }
-    
-    # Configurar opciones
-    CONFIG[use_virtualenv]=$(ask_yes_no "¿Usar entorno virtual?" "y")
-    CONFIG[use_docker]=$(ask_yes_no "¿Usar Docker?" "y")
-    CONFIG[init_git]=$(ask_yes_no "¿Inicializar Git?" "y")
-    CONFIG[use_precommit]=$(ask_yes_no "¿Usar pre-commit?" "n")
-    
-    # Opciones avanzadas
+
+    # Función auxiliar para actualizar la configuración
+    update_config() {
+        local key="$1"
+        local prompt="$2"
+        local default="${3:-y}"
+
+        if ask_yes_no "$prompt" "$default"; then
+            CONFIG[$key]="y"
+        else
+            CONFIG[$key]="n"
+        fi
+    }
+
+    # Configurar opciones básicas
+    update_config "use_virtualenv" "¿Usar entorno virtual?" "y"
+    update_config "use_docker" "¿Usar Docker?" "y"
+    update_config "init_git" "¿Inicializar Git?" "y"
+    update_config "use_precommit" "¿Usar pre-commit?" "n"
+
+    # Configurar opciones avanzadas
     if ask_yes_no "¿Configurar opciones avanzadas?" "n"; then
-        CONFIG[use_typescript]=$(ask_yes_no "¿Usar TypeScript?" "n")
-        CONFIG[use_terraform]=$(ask_yes_no "¿Incluir configuración Terraform?" "n")
-        CONFIG[use_cicd]=$(ask_yes_no "¿Configurar CI/CD?" "n")
+        update_config "use_typescript" "¿Usar TypeScript?" "n"
+        update_config "use_terraform" "¿Incluir configuración Terraform?" "n"
+        update_config "use_cicd" "¿Configurar CI/CD?" "n"
     fi
 }
 
@@ -3188,17 +3227,17 @@ create_project() {
     
     # Configurar Terraform si está habilitado
     if [[ ${CONFIG[use_terraform]:-n} == "y" ]]; then
-        setup_terraform
+        setup_terraform "."
     fi
     
     # Configurar CI/CD si está habilitado
     if [[ ${CONFIG[use_cicd]:-n} == "y" ]]; then
-        setup_cicd
+        setup_cicd "." "${CONFIG[project_name]}"
     fi
     
     # Inicializar Git si está habilitado
     if [[ ${CONFIG[init_git]} == "y" ]]; then
-        initialize_git "."
+        initialize_git "." "${CONFIG[project_name]}" "${CONFIG[use_precommit]}"
     fi
     
     # Instalar plugins seleccionados
@@ -3245,7 +3284,7 @@ show_summary() {
 EOF
 
     # Si hay advertencias, mostrarlas
-    if [[ ${#WARNINGS[@]:-0} -gt 0 ]]; then
+    if [[ ${WARNINGS[@]:-0} -gt 0 ]]; then
         echo -e "\n⚠️  Advertencias durante la instalación:"
         printf '%s\n' "${WARNINGS[@]}"
     fi
@@ -3332,7 +3371,6 @@ select_plugins() {
             selected_states[current_pos]=$((1 - selected_states[current_pos]))
             ;;
         "[A"|"k") # Arriba
-            log "Current position antes de update" $current_pos
             if ((current_pos == 0)); then
                 # Si está en el primer elemento, ir al último
                 current_pos=$((${#AVAILABLE_PLUGINS[@]} - 1))
@@ -3340,10 +3378,8 @@ select_plugins() {
                 # Si no, subir una posición
                 current_pos=$((current_pos - 1))
             fi
-            log "Current position después de update" $current_pos
             ;;
         "[B"|"j") # Abajo
-            log "Current position antes de update abajo" $current_pos
             if ((current_pos >= ${#AVAILABLE_PLUGINS[@]} - 1)); then
                 # Si está en el último elemento, ir al primero
                 current_pos=0
@@ -3351,25 +3387,24 @@ select_plugins() {
                 # Si no, bajar una posición
                 current_pos=$((current_pos + 1))
             fi
-            log "Current position después de update abajo" $current_pos
             ;;
         "q") # Salir
-            is_active=false
             SELECTED_PLUGINS=()
-            return 1
+            is_active=false
+            stty "$saved_tty_state" # Restaurar terminal
+            clear_screen
+            break
             ;;
         $'\n') # Enter
             if validate_selection; then
-                is_active=false
                 save_selection
-                return 0
+                break
             else
                 warning "⚠️ Debes seleccionar al menos un plugin"
                 sleep 1
             fi
             ;;
-    esac
-    return 0
+        esac
     }
 
     validate_selection() {
@@ -3384,6 +3419,15 @@ select_plugins() {
         for i in "${!AVAILABLE_PLUGINS[@]}"; do
             [[ ${selected_states[i]} -eq 1 ]] && SELECTED_PLUGINS+=("${AVAILABLE_PLUGINS[i]}")
         done
+
+        echo -e "\n✅ Plugins seleccionados: ${SELECTED_PLUGINS[*]}"
+
+        is_active=false
+
+        # Restaurar terminal
+        stty "$saved_tty_state"
+
+        clear_screen
     }
 
     main_loop() {
@@ -3398,6 +3442,754 @@ select_plugins() {
     main_loop
     stty "$saved_tty_state" # Restaurar terminal
     clear_screen
+}
+
+# ==========================================
+# Configuracion de Terraform
+# ==========================================
+setup_terraform() {
+    local project_dir="$1"
+    info "🔧 Configurando Terraform..."
+
+    # Crear estructura de directorios
+    mkdir -p "${project_dir}/terraform/environments/"{dev,staging,prod}
+    mkdir -p "${project_dir}/terraform/modules/"{dynamodb,lambda,api-gateway}
+
+    # Crear archivo principal
+    cat > "${project_dir}/terraform/main.tf" <<'EOF'
+terraform {
+  required_version = ">= 1.0.0"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+
+  backend "s3" {
+    # Se configurará por ambiente
+  }
+}
+
+provider "aws" {
+  region = var.aws_region
+
+  default_tags {
+    tags = {
+      Environment = var.environment
+      Project     = var.project_name
+      ManagedBy   = "terraform"
+    }
+  }
+}
+
+# Variables locales
+locals {
+  name_prefix = "${var.project_name}-${var.environment}"
+}
+
+# Módulos
+module "dynamodb" {
+  source = "./modules/dynamodb"
+
+  name_prefix = local.name_prefix
+  environment = var.environment
+  tables      = var.dynamodb_tables
+}
+
+module "lambda" {
+  source = "./modules/lambda"
+
+  name_prefix = local.name_prefix
+  environment = var.environment
+  functions   = var.lambda_functions
+}
+
+module "api_gateway" {
+  source = "./modules/api-gateway"
+
+  name_prefix = local.name_prefix
+  environment = var.environment
+  api_name    = var.api_name
+  endpoints   = var.api_endpoints
+}
+EOF
+
+    # Crear variables
+    cat > "${project_dir}/terraform/variables.tf" <<'EOF'
+variable "project_name" {
+  description = "Nombre del proyecto"
+  type        = string
+}
+
+variable "environment" {
+  description = "Ambiente de despliegue (dev, staging, prod)"
+  type        = string
+}
+
+variable "aws_region" {
+  description = "Región de AWS"
+  type        = string
+  default     = "us-east-1"
+}
+
+variable "dynamodb_tables" {
+  description = "Configuración de tablas DynamoDB"
+  type = list(object({
+    name             = string
+    hash_key         = string
+    range_key        = optional(string)
+    billing_mode     = optional(string)
+    read_capacity    = optional(number)
+    write_capacity   = optional(number)
+    stream_enabled   = optional(bool)
+    attributes       = list(object({
+      name = string
+      type = string
+    }))
+    global_secondary_indexes = optional(list(object({
+      name               = string
+      hash_key          = string
+      range_key         = optional(string)
+      projection_type   = string
+      non_key_attributes = optional(list(string))
+    })))
+  }))
+  default = []
+}
+
+variable "lambda_functions" {
+  description = "Configuración de funciones Lambda"
+  type = list(object({
+    name        = string
+    handler     = string
+    runtime     = string
+    memory_size = optional(number)
+    timeout     = optional(number)
+    environment_variables = optional(map(string))
+  }))
+  default = []
+}
+
+variable "api_endpoints" {
+  description = "Configuración de endpoints de API Gateway"
+  type = list(object({
+    path        = string
+    method      = string
+    function    = string
+    auth        = optional(bool)
+    cors        = optional(bool)
+  }))
+  default = []
+}
+
+variable "api_name" {
+  description = "Nombre de la API"
+  type        = string
+}
+EOF
+
+    # Crear outputs
+    cat > "${project_dir}/terraform/outputs.tf" <<'EOF'
+output "dynamodb_table_arns" {
+  description = "ARNs de las tablas DynamoDB"
+  value       = module.dynamodb.table_arns
+}
+
+output "lambda_function_arns" {
+  description = "ARNs de las funciones Lambda"
+  value       = module.lambda.function_arns
+}
+
+output "api_gateway_url" {
+  description = "URL de la API Gateway"
+  value       = module.api_gateway.api_url
+}
+
+output "api_gateway_stage" {
+  description = "Stage de la API Gateway"
+  value       = module.api_gateway.stage_name
+}
+EOF
+
+    # Crear módulo DynamoDB
+    cat > "${project_dir}/terraform/modules/dynamodb/main.tf" <<'EOF'
+resource "aws_dynamodb_table" "tables" {
+  for_each = { for table in var.tables : table.name => table }
+
+  name           = "${var.name_prefix}-${each.value.name}"
+  billing_mode   = each.value.billing_mode != null ? each.value.billing_mode : "PAY_PER_REQUEST"
+  hash_key       = each.value.hash_key
+  range_key      = each.value.range_key
+
+  dynamic "attribute" {
+    for_each = each.value.attributes
+    content {
+      name = attribute.value.name
+      type = attribute.value.type
+    }
+  }
+
+  dynamic "global_secondary_index" {
+    for_each = each.value.global_secondary_indexes != null ? each.value.global_secondary_indexes : []
+    content {
+      name               = global_secondary_index.value.name
+      hash_key          = global_secondary_index.value.hash_key
+      range_key         = global_secondary_index.value.range_key
+      projection_type   = global_secondary_index.value.projection_type
+      non_key_attributes = global_secondary_index.value.non_key_attributes
+    }
+  }
+
+  stream_enabled = each.value.stream_enabled
+
+  point_in_time_recovery {
+    enabled = true
+  }
+
+  server_side_encryption {
+    enabled = true
+  }
+
+  tags = {
+    Name        = "${var.name_prefix}-${each.value.name}"
+    Environment = var.environment
+  }
+}
+EOF
+
+    # Crear configuraciones por ambiente
+    for env in dev staging prod; do
+        cat > "${project_dir}/terraform/environments/${env}/main.tf" <<EOF
+terraform {
+  backend "s3" {
+    bucket         = "your-terraform-state-bucket"
+    key            = "${env}/terraform.tfstate"
+    region         = "us-east-1"
+    dynamodb_table = "terraform-lock"
+    encrypt        = true
+  }
+}
+
+module "main" {
+  source = "../../"
+
+  project_name = "your-project"
+  environment  = "${env}"
+  aws_region   = "us-east-1"
+
+  dynamodb_tables = [
+    {
+      name      = "orders"
+      hash_key  = "id"
+      attributes = [
+        {
+          name = "id"
+          type = "S"
+        },
+        {
+          name = "status"
+          type = "S"
+        }
+      ]
+      global_secondary_indexes = [
+        {
+          name            = "StatusIndex"
+          hash_key       = "status"
+          projection_type = "ALL"
+        }
+      ]
+    }
+  ]
+
+  lambda_functions = [
+    {
+      name        = "get-orders"
+      handler     = "src/functions/orders/get.handler"
+      runtime     = "python3.9"
+      memory_size = 128
+      timeout     = 30
+    }
+  ]
+
+  api_endpoints = [
+    {
+      path     = "/orders"
+      method   = "GET"
+      function = "get-orders"
+      cors     = true
+    }
+  ]
+}
+EOF
+    done
+
+    # Crear .gitignore específico para Terraform
+    cat >> "${project_dir}/.gitignore" <<'EOF'
+
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+*.tfvars
+EOF
+
+    # Crear README específico para Terraform
+    cat > "${project_dir}/terraform/README.md" <<'EOF'
+# Infraestructura Terraform
+
+## 📋 Descripción
+Configuración de infraestructura como código usando Terraform para el proyecto.
+
+## 🚀 Uso
+
+### Pre-requisitos
+- Terraform >= 1.0.0
+- AWS CLI configurado
+- S3 bucket para estado remoto
+- DynamoDB table para bloqueo de estado
+
+### Inicialización
+```bash
+# Configurar ambiente
+cd environments/dev
+
+# Inicializar Terraform
+terraform init
+
+# Planear cambios
+terraform plan
+
+# Aplicar cambios
+terraform apply
+```
+
+## 📁 Estructura
+```
+terraform/
+├── environments/          # Configuraciones por ambiente
+│   ├── dev/
+│   ├── staging/
+│   └── prod/
+├── modules/              # Módulos reutilizables
+│   ├── dynamodb/
+│   ├── lambda/
+│   └── api-gateway/
+├── main.tf              # Configuración principal
+├── variables.tf         # Definición de variables
+└── outputs.tf           # Outputs definidos
+```
+
+## ⚙️ Configuración
+1. Configurar backend S3 en cada ambiente
+2. Ajustar variables según necesidades
+3. Revisar configuraciones de seguridad
+
+## 🔒 Seguridad
+- Encriptación en reposo habilitada
+- Point-in-time recovery configurado
+- Least privilege IAM roles
+EOF
+
+    success "✅ Configuración de Terraform creada exitosamente"
+    info "ℹ️  Revisa terraform/README.md para instrucciones de uso"
+}
+
+# ==========================================
+# Configuración de CI/CD
+# ==========================================
+setup_cicd() {
+    local project_dir="$1"
+    info "🔧 Configurando CI/CD..."
+
+    # Crear directorios para GitHub Actions
+    mkdir -p "${project_dir}/.github/workflows"
+
+    # Crear workflow principal
+    cat > "${project_dir}/.github/workflows/main.yml" <<'EOF'
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: '3.9'
+  NODE_VERSION: '16'
+  AWS_REGION: 'us-east-1'
+
+jobs:
+  validate:
+    name: 🔍 Validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Cache pip packages
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Cache node modules
+        uses: actions/cache@v3
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+          npm ci
+
+      - name: Run linters
+        run: |
+          pre-commit run --all-files
+
+      - name: Run tests
+        run: |
+          pytest --cov=src --cov-report=xml
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./coverage.xml
+          fail_ci_if_error: true
+
+  deploy-dev:
+    name: 🚀 Deploy to Dev
+    needs: validate
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: development
+    
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          npm ci
+
+      - name: Deploy to dev
+        run: |
+          npx serverless deploy --stage dev
+        env:
+          NODE_ENV: development
+          STAGE: dev
+
+  deploy-staging:
+    name: 🚀 Deploy to Staging
+    needs: deploy-dev
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: staging
+    
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy to staging
+        run: |
+          npx serverless deploy --stage staging
+        env:
+          NODE_ENV: staging
+          STAGE: staging
+
+  deploy-prod:
+    name: 🚀 Deploy to Production
+    needs: deploy-staging
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: production
+    
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy to production
+        run: |
+          npx serverless deploy --stage prod
+        env:
+          NODE_ENV: production
+          STAGE: prod
+EOF
+
+    # Crear workflow para pruebas
+    cat > "${project_dir}/.github/workflows/tests.yml" <<'EOF'
+name: Tests
+
+on:
+  push:
+    branches-ignore: [ main ]
+  pull_request:
+    branches-ignore: [ main ]
+
+env:
+  PYTHON_VERSION: '3.9'
+  NODE_VERSION: '16'
+
+jobs:
+  test:
+    name: 🧪 Run Tests
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+          npm ci
+
+      - name: Run linters
+        run: |
+          pre-commit run --all-files
+
+      - name: Run tests
+        run: |
+          pytest --cov=src --cov-report=xml
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./coverage.xml
+          fail_ci_if_error: true
+EOF
+
+    # Crear workflow para seguridad
+    cat > "${project_dir}/.github/workflows/security.yml" <<'EOF'
+name: Security Scan
+
+on:
+  schedule:
+    - cron: '0 0 * * *'  # Diariamente a medianoche
+  workflow_dispatch:
+
+jobs:
+  security-scan:
+    name: 🔒 Security Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Run Snyk to check for vulnerabilities
+        uses: snyk/actions/python@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --severity-threshold=high
+
+      - name: Run safety check
+        run: |
+          pip install safety
+          safety check
+
+      - name: Run bandit
+        run: |
+          pip install bandit
+          bandit -r src/
+
+      - name: Run dependency review
+        uses: actions/dependency-review-action@v2
+EOF
+
+    # Crear workflow para releases
+    cat > "${project_dir}/.github/workflows/release.yml" <<'EOF'
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    name: 📦 Create Release
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Generate changelog
+        id: changelog
+        uses: metcalfc/changelog-generator@v4.0.1
+        with:
+          myToken: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create release
+        uses: softprops/action-gh-release@v1
+        with:
+          body: ${{ steps.changelog.outputs.changelog }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+EOF
+
+    # Crear archivos de configuración adicionales
+    mkdir -p "${project_dir}/.github/ISSUE_TEMPLATE"
+    
+    # Template para bugs
+    cat > "${project_dir}/.github/ISSUE_TEMPLATE/bug_report.md" <<'EOF'
+---
+name: Bug report
+about: Create a report to help us improve
+title: '[BUG] '
+labels: bug
+assignees: ''
+
+---
+
+**Describe the bug**
+A clear and concise description of what the bug is.
+
+**To Reproduce**
+Steps to reproduce the behavior:
+1. Go to '...'
+2. Click on '....'
+3. Scroll down to '....'
+4. See error
+
+**Expected behavior**
+A clear and concise description of what you expected to happen.
+
+**Screenshots**
+If applicable, add screenshots to help explain your problem.
+
+**Environment:**
+ - OS: [e.g. Ubuntu 20.04]
+ - Python Version: [e.g. 3.9]
+ - Node Version: [e.g. 16]
+
+**Additional context**
+Add any other context about the problem here.
+EOF
+
+    # Template para features
+    cat > "${project_dir}/.github/ISSUE_TEMPLATE/feature_request.md" <<'EOF'
+---
+name: Feature request
+about: Suggest an idea for this project
+title: '[FEATURE] '
+labels: enhancement
+assignees: ''
+
+---
+
+**Is your feature request related to a problem? Please describe.**
+A clear and concise description of what the problem is. Ex. I'm always frustrated when [...]
+
+**Describe the solution you'd like**
+A clear and concise description of what you want to happen.
+
+**Describe alternatives you've considered**
+A clear and concise description of any alternative solutions or features you've considered.
+
+**Additional context**
+Add any other context or screenshots about the feature request here.
+EOF
+
+    # Crear pull request template
+    cat > "${project_dir}/.github/pull_request_template.md" <<'EOF'
+## Description
+Please include a summary of the change and which issue is fixed. Please also include relevant motivation and context.
+
+Fixes # (issue)
+
+## Type of change
+Please delete options that are not relevant.
+
+- [ ] Bug fix (non-breaking change which fixes an issue)
+- [ ] New feature (non-breaking change which adds functionality)
+- [ ] Breaking change (fix or feature that would cause existing functionality to not work as expected)
+- [ ] This change requires a documentation update
+
+## How Has This Been Tested?
+Please describe the tests that you ran to verify your changes.
+
+- [ ] Test A
+- [ ] Test B
+
+## Checklist:
+- [ ] My code follows the style guidelines of this project
+- [ ] I have performed a self-review of my own code
+- [ ] I have commented my code, particularly in hard-to-understand areas
+- [ ] I have made corresponding changes to the documentation
+- [ ] My changes generate no new warnings
+- [ ] I have added tests that prove my fix is effective or that my feature works
+- [ ] New and existing unit tests pass locally with my changes
+- [ ] Any dependent changes have been merged and published in downstream modules
+EOF
+
+    success "✅ Configuración de CI/CD creada exitosamente"
+    info "ℹ️  Revisa los workflows en .github/workflows/"
 }
 
 # Ejecutar script solo si no es sourced
