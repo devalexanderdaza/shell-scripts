@@ -10,6 +10,29 @@ set -euo pipefail
 IFS=$'\n\t'
 
 # ==========================================
+# Constantes de Teclas
+# ==========================================
+declare -r KEY_SPACE=" "
+declare -r KEY_ENTER=$'\n'
+declare -r KEY_UP=$'\x1b[A'
+declare -r KEY_DOWN=$'\x1b[B'
+declare -r KEY_K="k"
+declare -r KEY_J="j"
+declare -r KEY_Q="q"
+
+# Lista de plugins disponibles
+declare -ra AVAILABLE_PLUGINS=(
+    "serverless-python-requirements"
+    "serverless-iam-roles-per-function"
+    "serverless-offline"
+    "serverless-dynamodb-local"
+    "serverless-localstack"
+    "serverless-plugin-aws-alerts"
+    "serverless-plugin-warmup"
+    "serverless-prune-plugin"
+)
+
+# ==========================================
 # Configuración y Variables Globales
 # ==========================================
 declare -r RED='\033[0;31m'
@@ -167,7 +190,7 @@ setup_precommit() {
 # ==========================================
 # Gestión de Plugins Mejorada
 # ==========================================
-select_plugins() {
+select_plugins_old() {
     local active_screen=true
 
     local -a available_plugins=(
@@ -299,10 +322,15 @@ select_plugins() {
     clear_screen
 }
 
+# ==========================================
+# Instalación de Plugins Mejorada
+# ==========================================
 install_serverless_plugins() {
+    [[ ${#SELECTED_PLUGINS[@]} -eq 0 ]] && return 0
+    
     info "🔧 Instalando plugins..."
     local install_errors=0
-
+    
     for plugin in "${SELECTED_PLUGINS[@]}"; do
         echo -n "Instalando $plugin... "
         if npm install --save-dev "$plugin"; then
@@ -312,11 +340,14 @@ install_serverless_plugins() {
             ((install_errors++))
         fi
     done
-
+    
     if [[ $install_errors -gt 0 ]]; then
         warning "⚠️ Algunos plugins no se instalaron correctamente"
         return 1
     fi
+    
+    success "✅ Plugins instalados correctamente"
+    return 0
 }
 
 # ==========================================
@@ -3226,6 +3257,131 @@ cleanup() {
         info "🧹 Limpiando recursos..."
         rm -rf "${CONFIG[project_name]}"
     fi
+}
+
+# Clase PluginSelector
+select_plugins() {
+    local -a selected_states=()
+    local current_pos=0
+    local is_active=true
+    local saved_tty_state
+
+    initialize() {
+        # Inicializar estados de selección
+        selected_states=($(for ((i=0; i<${#AVAILABLE_PLUGINS[@]}; i++)); do echo 0; done))
+        
+        # Guardar y configurar estado de la terminal
+        saved_tty_state=$(stty -g)
+        stty raw -echo
+        
+        # Limpiar pantalla inicial
+        clear_screen
+    }
+
+    clear_screen() {
+        tput clear
+        tput cup 0 0
+    }
+
+    get_selected_count() {
+        local count=0
+        for state in "${selected_states[@]}"; do
+            ((count += state))
+        done
+        echo "$count"
+    }
+
+    render_menu() {
+        clear_screen
+        
+        # Encabezado
+        echo -e "🔌 ${BOLD}Selecciona los plugins a instalar:${NC}\n"
+        
+        # Contador de selección
+        local selected_count
+        selected_count=$(get_selected_count)
+        echo -e "Plugins seleccionados: ${GREEN}${selected_count}${NC}/${#AVAILABLE_PLUGINS[@]}\n"
+        
+        # Lista de plugins
+        for i in "${!AVAILABLE_PLUGINS[@]}"; do
+            local checkmark=" "
+            [[ ${selected_states[i]} -eq 1 ]] && checkmark="✔"
+            
+            if [[ $i -eq $current_pos ]]; then
+                echo -e "${YELLOW}  [${checkmark}] ${AVAILABLE_PLUGINS[i]}${NC}"
+            else
+                echo -e "  [${checkmark}] ${AVAILABLE_PLUGINS[i]}"
+            fi
+        done
+        
+        # Instrucciones
+        echo -e "\n[Space] Seleccionar/Deseleccionar  [↑/↓] Mover  [Enter] Confirmar  [Q] Salir\n"
+    }
+
+    handle_key_press() {
+        local key
+        read -rsN1 key
+        
+        # Detectar teclas de flecha (secuencia de escape)
+        if [[ $key == $'\x1b' ]]; then
+            read -rsN2 key
+        fi
+
+        case $key in
+            " ") # Espacio
+                selected_states[current_pos]=$((1 - selected_states[current_pos]))
+                ;;
+            "[A"|"k") # Arriba
+                ((current_pos = (current_pos - 1 + ${#AVAILABLE_PLUGINS[@]}) % ${#AVAILABLE_PLUGINS[@]}))
+                ;;
+            "[B"|"j") # Abajo
+                ((current_pos = (current_pos + 1) % ${#AVAILABLE_PLUGINS[@]}))
+                ;;
+            "q") # Salir
+                is_active=false
+                SELECTED_PLUGINS=()
+                return 1
+                ;;
+            $'\n') # Enter
+                if validate_selection; then
+                    is_active=false
+                    save_selection
+                    return 0
+                else
+                    warning "⚠️ Debes seleccionar al menos un plugin"
+                    sleep 1
+                fi
+                ;;
+        esac
+        return 0
+    }
+
+    validate_selection() {
+        for state in "${selected_states[@]}"; do
+            [[ $state -eq 1 ]] && return 0
+        done
+        return 1
+    }
+
+    save_selection() {
+        SELECTED_PLUGINS=()
+        for i in "${!AVAILABLE_PLUGINS[@]}"; do
+            [[ ${selected_states[i]} -eq 1 ]] && SELECTED_PLUGINS+=("${AVAILABLE_PLUGINS[i]}")
+        done
+    }
+
+    main_loop() {
+        while $is_active; do
+            render_menu
+            handle_key_press
+        done
+    }
+
+    # Ejecución principal
+    initialize
+    main_loop
+    stty "$saved_tty_state" # Restaurar terminal
+    clear_screen
 }
 
 # Ejecutar script solo si no es sourced
