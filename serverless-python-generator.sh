@@ -3328,32 +3328,48 @@ select_plugins() {
         fi
 
         case $key in
-            " ") # Espacio
-                selected_states[current_pos]=$((1 - selected_states[current_pos]))
-                ;;
-            "[A"|"k") # Arriba
-                ((current_pos = (current_pos - 1 + ${#AVAILABLE_PLUGINS[@]}) % ${#AVAILABLE_PLUGINS[@]}))
-                ;;
-            "[B"|"j") # Abajo
-                ((current_pos = (current_pos + 1) % ${#AVAILABLE_PLUGINS[@]}))
-                ;;
-            "q") # Salir
+        " ") # Espacio
+            selected_states[current_pos]=$((1 - selected_states[current_pos]))
+            ;;
+        "[A"|"k") # Arriba
+            log "Current position antes de update" $current_pos
+            if ((current_pos == 0)); then
+                # Si está en el primer elemento, ir al último
+                current_pos=$((${#AVAILABLE_PLUGINS[@]} - 1))
+            else
+                # Si no, subir una posición
+                current_pos=$((current_pos - 1))
+            fi
+            log "Current position después de update" $current_pos
+            ;;
+        "[B"|"j") # Abajo
+            log "Current position antes de update abajo" $current_pos
+            if ((current_pos >= ${#AVAILABLE_PLUGINS[@]} - 1)); then
+                # Si está en el último elemento, ir al primero
+                current_pos=0
+            else
+                # Si no, bajar una posición
+                current_pos=$((current_pos + 1))
+            fi
+            log "Current position después de update abajo" $current_pos
+            ;;
+        "q") # Salir
+            is_active=false
+            SELECTED_PLUGINS=()
+            return 1
+            ;;
+        $'\n') # Enter
+            if validate_selection; then
                 is_active=false
-                SELECTED_PLUGINS=()
-                return 1
-                ;;
-            $'\n') # Enter
-                if validate_selection; then
-                    is_active=false
-                    save_selection
-                    return 0
-                else
-                    warning "⚠️ Debes seleccionar al menos un plugin"
-                    sleep 1
-                fi
-                ;;
-        esac
-        return 0
+                save_selection
+                return 0
+            else
+                warning "⚠️ Debes seleccionar al menos un plugin"
+                sleep 1
+            fi
+            ;;
+    esac
+    return 0
     }
 
     validate_selection() {
