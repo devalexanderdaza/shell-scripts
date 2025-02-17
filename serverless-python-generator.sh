@@ -42,9 +42,10 @@ declare -r NC='\033[0m'
 declare -r BOLD='\033[1m'
 
 # Versiones mínimas requeridas
-declare -r MIN_PYTHON_VERSION="3.8"
-declare -r MIN_NODE_VERSION="16"
-declare -r CONFIG_FILE="config.json"
+declare -r MIN_PYTHON_VERSION="3.9"
+declare -r MIN_PIP_VERSION="24.0"
+declare -r MIN_NODE_VERSION="18"
+declare -r CONFIG_FILE=".generator-config"
 
 # Directorio actual del script obtenido sin importar la shell utilizada
 declare -r SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || {
@@ -83,6 +84,42 @@ print_step() {
     echo -e "\n${YELLOW}${BOLD}Step $1: $2${NC}\n"
 }
 
+# Verificar comando
+check_command() {
+    if ! command -v "$1" &>/dev/null; then
+        error "❌ $1 no está instalado. Por favor, instálalo primero."
+    fi
+}
+
+# Verificar puerto
+check_port() {
+    if lsof -i :"$1" >/dev/null 2>&1; then
+        warning "⚠️ Puerto $1 en uso. Intentando liberar..."
+        lsof -ti :"$1" | xargs -r kill -9
+    fi
+}
+
+# Esperar servicio
+wait_for_service() {
+    local host="$1"
+    local port="$2"
+    local service_name="$3"
+    local max_attempts="$4"
+    local attempt=0
+
+    info "⏳ Esperando a que $service_name esté disponible..."
+    while ! nc -z "$host" "$port" >/dev/null 2>&1; do
+        attempt=$((attempt + 1))
+        if [ $attempt -eq "$max_attempts" ]; then
+            error "❌ $service_name no respondió después de $max_attempts intentos"
+        fi
+        echo -n "."
+        sleep 1
+    done
+    echo ""
+    success "✅ $service_name está listo"
+}
+
 # ==========================================
 # Validaciones Mejoradas
 # ==========================================
@@ -114,6 +151,22 @@ version_check() {
 }
 
 check_dependencies() {
+    local UPGRADE_PYTHON=false
+    local UPGRADE_PIP=false
+    local UPGRADE_NODE=false
+
+    if [[ CONFIG["upgrade_python"] == "y" ]]; then
+        UPGRADE_PYTHON=true
+    fi
+
+    if [[ CONFIG["upgrade_pip"] == "y" ]]; then
+        UPGRADE_PIP=true
+    fi
+
+    if [[ CONFIG["upgrade_node"] == "y" ]]; then
+        UPGRADE_NODE=true
+    fi
+
     info "🔍 Verificando dependencias del sistema..."
 
     local missing_deps=()
@@ -132,12 +185,56 @@ check_dependencies() {
     python_version=$(python3 -c 'import sys; print(".".join(map(str, sys.version_info[:2])))')
     if ! version_check "$python_version" "$MIN_PYTHON_VERSION"; then
         error "❌ Se requiere Python >= $MIN_PYTHON_VERSION (actual: $python_version)"
+        # Verificar si se requiere actualizar Python
+        if $UPGRADE_PYTHON; then
+            warning "⚠️ Se recomienda actualizar Python a la última versión estable"
+        fi
+    fi
+
+    local pip_version
+    pip_version=$(pip3 --version | cut -d' ' -f2)
+    if ! version_check "$pip_version" "$MIN_PIP_VERSION"; then
+        error "❌ Se requiere pip >= $MIN_PIP_VERSION (actual: $pip_version)"
+        # Verificar si se requiere actualizar pip
+        if $UPGRADE_PIP; then
+            warning "⚠️ Intentando actualizar pip..."
+            if ! pip3 install --upgrade pip; then
+                error "❌ Error al actualizar pip"
+            fi
+
+            # Verificar versión actualizada
+            pip_version=$(pip3 --version | cut -d' ' -f2)
+            if ! version_check "$pip_version" "$MIN_PIP_VERSION"; then
+                error "❌ Se requiere pip >= $MIN_PIP_VERSION (actual: $pip_version)"
+            fi
+
+            success "✅ pip actualizado correctamente a la versión $pip_version"
+        fi
     fi
 
     local node_version
     node_version=$(node -v | cut -d'v' -f2)
     if ! version_check "$node_version" "$MIN_NODE_VERSION"; then
         error "❌ Se requiere Node.js >= $MIN_NODE_VERSION (actual: $node_version)"
+        # Verificar si se requiere actualizar Node.js
+        if $UPGRADE_NODE; then
+            warning "⚠️ Intentando actualizar Node.js..."
+            if ! npm install -g n; then # Instalar n (Node.js version manager) globalmente
+                error "❌ Error al instalar n"
+            fi
+
+            if ! n stable; then
+                error "❌ Error al instalar la última versión estable de Node.js"
+            fi
+
+            # Verificar versión actualizada
+            node_version=$(node -v | cut -d'v' -f2)
+            if ! version_check "$node_version" "$MIN_NODE_VERSION"; then
+                error "❌ Se requiere Node.js >= $MIN_NODE_VERSION (actual: $node_version)"
+            fi
+
+            success "✅ Node.js actualizado correctamente a la versión $node_version"
+        fi
     fi
 
     success "✅ Todas las dependencias están instaladas correctamente"
@@ -160,9 +257,11 @@ setup_virtualenv() {
         error "❌ Error al activar entorno virtual"
     fi
 
-    if ! pip install --upgrade pip; then
-        error "❌ Error al actualizar pip"
-    fi
+    # Actualizar pip y setuptools en el entorno virtual (si se requiere)
+     info "🔧 Actualizando pip y setuptools..."
+        if ! pip install --upgrade pip setuptools; then
+            warning "⚠️ Error al actualizar pip y setuptools"
+        fi
 
     success "✅ active_screenEn=false && break virtual configurado"
 }
@@ -1804,7 +1903,6 @@ pdoc3==0.10.0
 radon==6.0.1
 xenon==0.9.1
 prospector==1.10.3
-pyreverse==1.0.1
 
 # ===========================================
 # Testing Extras
@@ -2785,40 +2883,36 @@ EOF
 
 install_dynamodb_local_from_url() {
     local project_dir="$1"
+    local use_docker="$2"
     local dynamodb_dir="${project_dir}/.dynamodb"
     local temp_dir="/tmp/dynamodb-install"
+
+    # Verificar si Docker está disponible
+    if [[ "$use_docker" == "y" ]]; then
+      check_command docker
+    fi
     
+    # Descargar archivo
     info "📦 Instalando DynamoDB Local..."
     
     # Crear directorios
     mkdir -p "$dynamodb_dir" "$temp_dir"
-    
+
     # URL y versión de DynamoDB
-    local VERSION="1.24.0"
-    local DOWNLOAD_URL="https://s3.us-west-2.amazonaws.com/dynamodb-local/dynamodb_local_${VERSION}.zip"
-    local CHECKSUM_URL="${DOWNLOAD_URL}.sha256"
-    local ZIP_FILE="${temp_dir}/dynamodb_local.zip"
+    local VERSION="latest"
+    local DOWNLOAD_URL="https://s3-us-west-2.amazonaws.com/dynamodb-local/dynamodb_local_${VERSION}.zip"
+    local ZIP_FILE="${temp_dir}/dynamodb_local_${VERSION}.zip"
     
     # Descargar archivo
     info "⬇️  Descargando DynamoDB Local..."
-    if ! wget -q -O "$ZIP_FILE" "$DOWNLOAD_URL"; then
-        error "❌ Error descargando DynamoDB Local"
-    fi
-    
-    # Verificar checksum
-    info "🔍 Verificando integridad..."
-    if command -v sha256sum &>/dev/null; then
-        wget -q -O - "$CHECKSUM_URL" | sha256sum -c - || {
-            error "❌ Verificación de checksum fallida"
-        }
-    else
-        warning "⚠️  sha256sum no disponible, omitiendo verificación"
+    if ! wget -P "$temp_dir" "$DOWNLOAD_URL"; then
+      error "❌ Error descargando DynamoDB Local"
     fi
     
     # Descomprimir archivo
     info "📂 Descomprimiendo archivos..."
-    if ! unzip -q -o "$ZIP_FILE" -d "$dynamodb_dir"; then
-        error "❌ Error descomprimiendo archivo"
+    if ! unzip "$ZIP_FILE" -d "$dynamodb_dir"; then
+      error "❌ Error descomprimiendo archivos"
     fi
     
     # Crear script de inicio
@@ -3178,6 +3272,12 @@ configure_options() {
         update_config "use_terraform" "¿Incluir configuración Terraform?" "n"
         update_config "use_cicd" "¿Configurar CI/CD?" "n"
     fi
+
+    # Configurar actualizaciones automáticas
+    update_config "auto_update" "¿Actualizar automáticamente las dependencias?" "y"
+    update_config "upgrade_python" "¿Actualizar Python a la última versión?" "n"
+    update_config "upgrade_pip" "¿Actualizar pip a la última versión?" "n"
+    update_config "upgrade_node" "¿Actualizar Node.js a la última versión?" "n"
 }
 
 # Guardar configuración
@@ -3243,6 +3343,9 @@ create_project() {
     # Instalar plugins seleccionados
     if [[ ${#SELECTED_PLUGINS[@]} -gt 0 ]]; then
         install_serverless_plugins
+
+        # Instalar DynamoDB Local si está habilitado
+        install_dynamodb_local_from_url "." "${CONFIG[use_docker]}"
     fi
 }
 
