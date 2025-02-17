@@ -1,0 +1,13 @@
+# Configuración generada el lun 17 feb 2025 13:54:05 -05
+CONFIG[upgrade_pip]='y'
+CONFIG[use_terraform]='y'
+CONFIG[auto_update]='n'
+CONFIG[init_git]='y'
+CONFIG[use_virtualenv]='y'
+CONFIG[upgrade_node]='n'
+CONFIG[use_docker]='y'
+CONFIG[use_cicd]='y'
+CONFIG[use_precommit]='n'
+CONFIG[project_name]='api'
+CONFIG[upgrade_python]='n'
+CONFIG[use_typescript]='n'
